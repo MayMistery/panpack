@@ -1,0 +1,7 @@
+/dist/
+/panpack
+/legacy/
+/.panpack/
+*.tmp
+*.log
+.DS_Store

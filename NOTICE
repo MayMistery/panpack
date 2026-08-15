@@ -1,0 +1,6 @@
+panpack
+Copyright 2026 panpack contributors
+
+This product depends on the Baidu Netdisk Go SDK:
+https://github.com/baidu-netdisk/baidu-drive-sdk-go
+Copyright its respective contributors, licensed under Apache License 2.0.
