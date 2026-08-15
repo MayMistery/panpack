@@ -64,6 +64,19 @@ panpack backup \
   --remote-dir /apps/your-app/server-backup
 ```
 
+续传已经由旧工具封好的文件，而不重新扫描或打包源目录：
+
+```bash
+panpack upload-batch \
+  --source-dir /data/staging \
+  --pattern 'chunk_*.tar' \
+  --remote-dir /apps/your-app/server-backup \
+  --state-file /data/upload-state.json \
+  --delete-after-verify
+```
+
+`upload-batch` 首次运行时会把匹配文件的名称和大小冻结到原子状态文件。每个文件先计算完整 MD5 和 4 MiB block MD5；若远端已存在同名且 size/MD5 一致则安全收敛，若同名但内容不同则拒绝覆盖。只有上传完成并通过远端 `filemetas` 的 size/MD5 校验后，`--delete-after-verify` 才会删除本地文件。命令中断后使用完全相同的参数重跑即可继续。
+
 重要参数：
 
 - `--state-dir`：清单和断点状态目录，默认 `<source>/.panpack`。

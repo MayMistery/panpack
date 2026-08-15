@@ -13,8 +13,10 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/MayMistery/panpack/internal/backup"
+	"github.com/MayMistery/panpack/internal/batchupload"
 	"github.com/MayMistery/panpack/internal/bytesize"
 	"github.com/MayMistery/panpack/internal/credentials"
 	"github.com/MayMistery/panpack/internal/resource"
@@ -40,6 +42,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	switch args[0] {
 	case "backup":
 		return runBackup(ctx, args[1:], stdout, stderr, false)
+	case "upload-batch":
+		return runUploadBatch(ctx, args[1:], stdout, stderr)
 	case "plan":
 		return runBackup(ctx, args[1:], stdout, stderr, true)
 	case "doctor":
@@ -58,6 +62,50 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 		printUsage(stderr)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func runUploadBatch(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("upload-batch", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	sourceDir := fs.String("source-dir", "", "directory containing sealed files (required)")
+	pattern := fs.String("pattern", "*.tar", "basename glob frozen into the first-run state")
+	remoteDir := fs.String("remote-dir", "", "absolute Baidu Netdisk destination (required)")
+	stateFile := fs.String("state-file", "", "atomic resume state (default: <source-dir>/.panpack-upload-state.json)")
+	tokenFile := fs.String("token-file", "", "credentials JSON; supports bypy.json")
+	deleteAfterVerify := fs.Bool("delete-after-verify", false, "delete each local file only after remote size/MD5 verification")
+	maxFileAttempts := fs.Int("max-file-attempts", 20, "file-level attempts before stopping")
+	retryDelay := fs.Duration("retry-delay", time.Minute, "initial delay between file-level attempts")
+	maxConcurrency := fs.Int("max-upload-concurrency", 16, "hard cap for adaptive upload concurrency")
+	sliceSize := fs.String("slice-size", "4MiB", "Baidu API block size")
+	minFree := fs.String("min-free", "4GiB", "minimum disk space to reserve")
+	reserveFraction := fs.Float64("reserve-fraction", 0.05, "fraction of filesystem capacity to reserve")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *sourceDir == "" || *remoteDir == "" {
+		return errors.New("--source-dir and --remote-dir are required")
+	}
+	limits := resource.DefaultLimits()
+	var err error
+	if limits.SliceSize, err = bytesize.Parse(*sliceSize); err != nil {
+		return fmt.Errorf("--slice-size: %w", err)
+	}
+	if limits.MinFree, err = bytesize.Parse(*minFree); err != nil {
+		return fmt.Errorf("--min-free: %w", err)
+	}
+	limits.ReserveFraction = *reserveFraction
+	limits.MaxUploadConcurrency = *maxConcurrency
+	logger := log.New(stderr, "", log.LstdFlags|log.Lmicroseconds)
+	result, err := batchupload.Run(ctx, batchupload.Config{
+		SourceDir: *sourceDir, Pattern: *pattern, RemoteDir: *remoteDir,
+		StateFile: *stateFile, TokenFile: *tokenFile, DeleteAfterVerify: *deleteAfterVerify,
+		MaxFileAttempts: *maxFileAttempts, RetryDelay: *retryDelay, Limits: limits, Logger: logger,
+	})
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "batch upload complete: files=%d/%d bytes=%s state=%s\n", result.CompletedFiles, result.TotalFiles, bytesize.Format(result.CompletedBytes), result.StateFile)
+	return nil
 }
 
 func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer, dryRun bool) error {
@@ -304,6 +352,7 @@ Usage:
   panpack doctor [flags]
   panpack plan --source DIR [backup flags]
   panpack backup --source DIR --remote-dir /apps/APP/BACKUP [flags]
+  panpack upload-batch --source-dir DIR --pattern '*.tar' --remote-dir /apps/APP/BACKUP [flags]
   panpack restore --snapshot FILE --manifest FILE --volumes DIR --destination DIR
   panpack auth login|import-bypy|refresh [flags]
   panpack version`)

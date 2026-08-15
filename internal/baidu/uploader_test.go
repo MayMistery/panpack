@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -135,6 +136,25 @@ func TestValidateRemotePath(t *testing.T) {
 	}
 	if got, err := validateRemotePath("/apps/test/a/../b"); err != nil || got != "/apps/test/b" {
 		t.Fatalf("got=%q err=%v", got, err)
+	}
+}
+
+func TestRemoteInfoNotFound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/rest/2.0/xpan/file" || r.URL.Query().Get("method") != "list" {
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]any{"errno": 0, "list": []any{}})
+	}))
+	defer server.Close()
+	client, err := NewWithAPI(api.NewClient(api.WithBaseURL(server.URL)), 4<<20, 1, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = client.RemoteInfo(context.Background(), "/apps/test/backup/missing.tar")
+	if !errors.Is(err, ErrRemoteNotFound) {
+		t.Fatalf("got %v, want ErrRemoteNotFound", err)
 	}
 }
 

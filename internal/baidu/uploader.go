@@ -23,6 +23,8 @@ import (
 
 const defaultMaxRetries = 5
 
+var ErrRemoteNotFound = errors.New("remote file not found")
+
 type Client struct {
 	api            *api.Client
 	blockSize      int64
@@ -39,6 +41,15 @@ type UploadStats struct {
 	RateLimits  int
 	Duration    time.Duration
 	Rapid       bool
+	Size        int64
+	MD5         string
+}
+
+type RemoteInfo struct {
+	FsID int64
+	Path string
+	Size int64
+	MD5  string
 }
 
 func New(accessToken string, blockSize int64, initialConcurrency, maxConcurrency int, logger *log.Logger) (*Client, error) {
@@ -104,6 +115,13 @@ func (c *Client) UploadFile(ctx context.Context, localPath, remotePath string) (
 	if err != nil {
 		return UploadStats{}, err
 	}
+	return c.UploadHashedFile(ctx, localPath, remotePath, size, fullMD5, blocks)
+}
+
+// UploadHashedFile uploads a file whose whole-file and API block hashes have
+// already been computed. The local size and every block hash are rechecked as
+// the bytes are read, so callers can safely use this to avoid hashing twice.
+func (c *Client) UploadHashedFile(ctx context.Context, localPath, remotePath string, size int64, fullMD5 string, blocks []string) (UploadStats, error) {
 	return c.upload(ctx, localPath, remotePath, size, fullMD5, blocks)
 }
 
@@ -125,7 +143,7 @@ func (c *Client) upload(ctx context.Context, localPath, remotePath string, size 
 	c.mu.Lock()
 	concurrency := c.concurrency
 	c.mu.Unlock()
-	stats := UploadStats{Concurrency: concurrency}
+	stats := UploadStats{Concurrency: concurrency, Size: size, MD5: fullMD5}
 	started := time.Now()
 	rtype := 2 // overwrite makes retries idempotent
 	var pre *api.PrecreateResponse
@@ -301,10 +319,10 @@ func (c *Client) uploadBlock(ctx context.Context, file *os.File, remotePath, upl
 	return retries, rates, nil
 }
 
-func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expectedMD5 string) error {
+func (c *Client) RemoteInfo(ctx context.Context, remotePath string) (RemoteInfo, error) {
 	remotePath, err := validateRemotePath(remotePath)
 	if err != nil {
-		return err
+		return RemoteInfo{}, err
 	}
 	dir, name := path.Split(remotePath)
 	dir = strings.TrimSuffix(dir, "/")
@@ -313,47 +331,48 @@ func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expe
 	for {
 		listing, err := c.api.File.List(ctx, &api.ListParams{Dir: dir, Order: &order, Desc: &desc, Start: &start, Limit: &limit})
 		if err != nil {
-			return fmt.Errorf("list remote directory %s: %w", dir, err)
+			return RemoteInfo{}, fmt.Errorf("list remote directory %s: %w", dir, err)
 		}
 		for _, file := range listing.List {
 			if file.ServerFilename != name && file.Path != remotePath {
 				continue
 			}
-			if file.Size != size {
-				return fmt.Errorf("remote size mismatch for %s: %d != %d", remotePath, file.Size, size)
-			}
-			if expectedMD5 == "" {
-				return nil
-			}
-
 			// The list API does not reliably include an MD5. Resolve the file's
 			// fs_id first, then use filemetas, whose contract includes size and MD5.
 			metadata, err := c.api.Download.Meta(ctx, &api.MetaParams{FsIDs: []int64{file.FsID}})
 			if err != nil {
-				return fmt.Errorf("read remote metadata for %s: %w", remotePath, err)
+				return RemoteInfo{}, fmt.Errorf("read remote metadata for %s: %w", remotePath, err)
 			}
 			for _, item := range metadata.List {
 				if item.FsID != file.FsID {
 					continue
 				}
-				if item.Size != size {
-					return fmt.Errorf("remote metadata size mismatch for %s: %d != %d", remotePath, item.Size, size)
-				}
 				if item.MD5 == "" {
-					return fmt.Errorf("remote metadata for %s has no md5", remotePath)
+					return RemoteInfo{}, fmt.Errorf("remote metadata for %s has no md5", remotePath)
 				}
-				if !strings.EqualFold(item.MD5, expectedMD5) {
-					return fmt.Errorf("remote md5 mismatch for %s: %s != %s", remotePath, item.MD5, expectedMD5)
-				}
-				return nil
+				return RemoteInfo{FsID: item.FsID, Path: item.Path, Size: item.Size, MD5: item.MD5}, nil
 			}
-			return fmt.Errorf("remote metadata not found for %s (fs_id=%d)", remotePath, file.FsID)
+			return RemoteInfo{}, fmt.Errorf("remote metadata not found for %s (fs_id=%d)", remotePath, file.FsID)
 		}
 		if len(listing.List) < limit {
-			return fmt.Errorf("remote file not found after upload: %s", remotePath)
+			return RemoteInfo{}, fmt.Errorf("%w: %s", ErrRemoteNotFound, remotePath)
 		}
 		start += len(listing.List)
 	}
+}
+
+func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expectedMD5 string) error {
+	info, err := c.RemoteInfo(ctx, remotePath)
+	if err != nil {
+		return err
+	}
+	if info.Size != size {
+		return fmt.Errorf("remote size mismatch for %s: %d != %d", remotePath, info.Size, size)
+	}
+	if expectedMD5 != "" && !strings.EqualFold(info.MD5, expectedMD5) {
+		return fmt.Errorf("remote md5 mismatch for %s: %s != %s", remotePath, info.MD5, expectedMD5)
+	}
+	return nil
 }
 
 func (c *Client) retry(ctx context.Context, fn func() error) (retries, rateLimits int, finalErr error) {

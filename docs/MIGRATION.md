@@ -10,6 +10,19 @@ panpack 的迁移原则：
 4. 普通文件保持 tar 兼容；超大文件由 panpack 自己分片并由恢复命令重组。
 5. 只有百度 API 创建文件后的响应以及随后目录元数据中的 size/MD5 都匹配，卷才进入完成状态。
 
+如果旧管线已经留下完整 tar 卷，只需要补传这些卷，可以冻结文件集合并原地续传：
+
+```bash
+panpack upload-batch \
+  --source-dir /root/autodl-tmp/_bypy_staging \
+  --pattern 'chunk_*.tar' \
+  --remote-dir /apps/bypy/autodl-tmp-backup \
+  --state-file /root/baidu_upload/panpack-legacy-state.json \
+  --delete-after-verify
+```
+
+状态文件不使用旧的 `done/` 标记作为完成证据。远端同名文件只有在 size/MD5 与本地一致时才会被接纳；内容不同会停止而不是覆盖。
+
 建议首次迁移：
 
 ```bash
