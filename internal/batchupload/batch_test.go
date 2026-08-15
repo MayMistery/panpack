@@ -59,13 +59,17 @@ func TestBatchRecoversExactRemoteRetriesAndDeletesVerifiedFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, aMD5, _, err := baidu.HashFile(filepath.Join(sourceDir, "a.tar"), cfg.Limits.SliceSize)
+	_, _, aBlocks, err := baidu.HashFile(filepath.Join(sourceDir, "a.tar"), cfg.Limits.SliceSize)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aRemoteMD5, err := baidu.RemoteMD5(aBlocks)
 	if err != nil {
 		t.Fatal(err)
 	}
 	client := &fakeUploadClient{
 		remote: map[string]baidu.RemoteInfo{
-			"/apps/test/backup/a.tar": {Path: "/apps/test/backup/a.tar", Size: int64(len(files["a.tar"])), MD5: aMD5},
+			"/apps/test/backup/a.tar": {Path: "/apps/test/backup/a.tar", Size: int64(len(files["a.tar"])), MD5: aRemoteMD5},
 		},
 		failures: map[string]int{"/apps/test/backup/b.tar": 1}, uploadCalls: map[string]int{},
 	}

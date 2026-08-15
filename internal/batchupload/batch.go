@@ -177,7 +177,7 @@ func runWithClient(ctx context.Context, cfg Config, state *State, client uploadC
 
 			remote, remoteErr := client.RemoteInfo(ctx, remotePath)
 			if remoteErr == nil {
-				if remote.Size != size || !strings.EqualFold(remote.MD5, fullMD5) {
+				if remote.Size != size || !baidu.RemoteMD5Matches(remote.MD5, fullMD5, blocks) {
 					return resultFromState(cfg.StateFile, state), fmt.Errorf("refusing to overwrite remote collision %s: remote size/md5 differs", remotePath)
 				}
 				logger.Printf("recovered already-uploaded %s from matching remote metadata", record.Name)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -162,7 +163,7 @@ func (c *Client) upload(ctx context.Context, localPath, remotePath string, size 
 	}
 	if pre.ReturnType == 2 {
 		stats.Rapid = true
-		if err := c.Verify(ctx, remotePath, size, fullMD5); err != nil {
+		if err := c.Verify(ctx, remotePath, size, fullMD5, blocks); err != nil {
 			c.feedback(stats)
 			return stats, fmt.Errorf("verify rapid upload: %w", err)
 		}
@@ -209,11 +210,11 @@ func (c *Client) upload(ctx context.Context, localPath, remotePath string, size 
 		c.feedback(stats)
 		return stats, fmt.Errorf("remote size mismatch: got %d, want %d", created.Size, size)
 	}
-	if created.MD5 != "" && !strings.EqualFold(created.MD5, fullMD5) {
+	if created.MD5 != "" && !RemoteMD5Matches(created.MD5, fullMD5, blocks) {
 		c.feedback(stats)
-		return stats, fmt.Errorf("remote md5 mismatch: got %s, want %s", created.MD5, fullMD5)
+		return stats, fmt.Errorf("remote md5 mismatch: got %s, want whole-file or Baidu composite checksum", created.MD5)
 	}
-	if err := c.Verify(ctx, remotePath, size, fullMD5); err != nil {
+	if err := c.Verify(ctx, remotePath, size, fullMD5, blocks); err != nil {
 		c.feedback(stats)
 		return stats, err
 	}
@@ -361,7 +362,7 @@ func (c *Client) RemoteInfo(ctx context.Context, remotePath string) (RemoteInfo,
 	}
 }
 
-func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expectedMD5 string) error {
+func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expectedMD5 string, blocks []string) error {
 	info, err := c.RemoteInfo(ctx, remotePath)
 	if err != nil {
 		return err
@@ -369,10 +370,67 @@ func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expe
 	if info.Size != size {
 		return fmt.Errorf("remote size mismatch for %s: %d != %d", remotePath, info.Size, size)
 	}
-	if expectedMD5 != "" && !strings.EqualFold(info.MD5, expectedMD5) {
-		return fmt.Errorf("remote md5 mismatch for %s: %s != %s", remotePath, info.MD5, expectedMD5)
+	if expectedMD5 != "" && !RemoteMD5Matches(info.MD5, expectedMD5, blocks) {
+		return fmt.Errorf("remote md5 mismatch for %s: %s does not match whole-file or Baidu composite checksum", remotePath, info.MD5)
 	}
 	return nil
+}
+
+// RemoteMD5Matches accepts both API variants observed in practice: a plain
+// whole-file MD5 and Baidu's encoded checksum of the compact JSON block list.
+// The latter is what the create, list, and filemetas APIs return for multipart
+// files. Since every uploaded block is checked separately, the composite binds
+// the verified bytes and their order without downloading the remote file again.
+func RemoteMD5Matches(remote, fullMD5 string, blocks []string) bool {
+	if strings.EqualFold(remote, fullMD5) {
+		return true
+	}
+	composite, err := RemoteMD5(blocks)
+	return err == nil && strings.EqualFold(remote, composite)
+}
+
+// RemoteMD5 calculates Baidu's multipart metadata checksum.
+func RemoteMD5(blocks []string) (string, error) {
+	if len(blocks) == 0 {
+		return "", errors.New("cannot calculate remote md5 without blocks")
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		return "", fmt.Errorf("marshal block list: %w", err)
+	}
+	sum := md5.Sum(encoded)
+	return encodeBaiduMD5(hex.EncodeToString(sum[:]))
+}
+
+func encodeBaiduMD5(value string) (string, error) {
+	if len(value) != md5.Size*2 {
+		return "", fmt.Errorf("invalid md5 length %d", len(value))
+	}
+	reordered := value[8:16] + value[0:8] + value[24:32] + value[16:24]
+	encoded := make([]byte, len(reordered))
+	for i := range reordered {
+		nibble, ok := hexNibble(reordered[i])
+		if !ok {
+			return "", fmt.Errorf("invalid md5 character %q", reordered[i])
+		}
+		encoded[i] = "0123456789abcdef"[nibble^byte(i&15)]
+	}
+	ninth, _ := hexNibble(encoded[9])
+	encoded[9] = 'g' + ninth
+	return string(encoded), nil
+}
+
+func hexNibble(value byte) (byte, bool) {
+	switch {
+	case value >= '0' && value <= '9':
+		return value - '0', true
+	case value >= 'a' && value <= 'f':
+		return value - 'a' + 10, true
+	case value >= 'A' && value <= 'F':
+		return value - 'A' + 10, true
+	default:
+		return 0, false
+	}
 }
 
 func (c *Client) retry(ctx context.Context, fn func() error) (retries, rateLimits int, finalErr error) {

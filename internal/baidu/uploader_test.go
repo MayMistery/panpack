@@ -26,8 +26,14 @@ func TestUploadFileUsesOfficialThreeStepProtocolAndVerifies(t *testing.T) {
 	if err := os.WriteFile(filePath, content, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	full := md5.Sum(content)
-	fullMD5 := hex.EncodeToString(full[:])
+	_, _, blockHashes, err := HashFile(filePath, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	remoteMD5, err := RemoteMD5(blockHashes)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var mu sync.Mutex
 	parts := map[int][]byte{}
@@ -71,7 +77,7 @@ func TestUploadFileUsesOfficialThreeStepProtocolAndVerifies(t *testing.T) {
 			if err := r.ParseForm(); err != nil {
 				t.Error(err)
 			}
-			writeJSON(w, map[string]any{"errno": 0, "fs_id": 1, "path": r.Form.Get("path"), "size": len(content), "md5": fullMD5})
+			writeJSON(w, map[string]any{"errno": 0, "fs_id": 1, "path": r.Form.Get("path"), "size": len(content), "md5": remoteMD5})
 
 		case r.URL.Path == "/rest/2.0/xpan/file" && method == "list":
 			writeJSON(w, map[string]any{"errno": 0, "list": []map[string]any{{
@@ -86,7 +92,7 @@ func TestUploadFileUsesOfficialThreeStepProtocolAndVerifies(t *testing.T) {
 			metaCalled = true
 			mu.Unlock()
 			writeJSON(w, map[string]any{"errno": 0, "list": []map[string]any{{
-				"fs_id": 1, "path": "/apps/test/backup/test.bin", "filename": "test.bin", "size": len(content), "md5": fullMD5,
+				"fs_id": 1, "path": "/apps/test/backup/test.bin", "filename": "test.bin", "size": len(content), "md5": remoteMD5,
 			}}})
 
 		default:
@@ -188,6 +194,27 @@ func TestHashEmptyFileHasRequiredBlock(t *testing.T) {
 	}
 	if size != 0 || full != "d41d8cd98f00b204e9800998ecf8427e" || len(blocks) != 1 || blocks[0] != full {
 		t.Fatalf("unexpected empty hash result: size=%d full=%s blocks=%v", size, full, blocks)
+	}
+}
+
+func TestRemoteMD5MatchesBaiduMultipartChecksum(t *testing.T) {
+	blocks := []string{
+		"e2fc714c4727ee9395f324cd2e7f331f",
+		"1f7690ebdd9b4caf8fab49ca1757bf27",
+	}
+	got, err := RemoteMD5(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = "87b70dc7fk7fabbb2bb07077786a82eb"
+	if got != want {
+		t.Fatalf("remote md5=%s, want %s", got, want)
+	}
+	if !RemoteMD5Matches(got, "deadbeefdeadbeefdeadbeefdeadbeef", blocks) {
+		t.Fatal("Baidu multipart checksum did not match its block list")
+	}
+	if RemoteMD5Matches(got, "deadbeefdeadbeefdeadbeefdeadbeef", blocks[:1]) {
+		t.Fatal("checksum unexpectedly matched a different block list")
 	}
 }
 
