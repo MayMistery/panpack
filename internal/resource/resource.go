@@ -172,13 +172,18 @@ func detectMemory() (limit, current, available int64) {
 	limit, lerr := readIntFile("/sys/fs/cgroup/memory.max")
 	current, cerr := readIntFile("/sys/fs/cgroup/memory.current")
 	if lerr == nil && cerr == nil && limit > 0 && limit < math.MaxInt64/2 {
-		return limit, current, max64(0, limit-current)
+		reclaimable, _ := readMemoryStat("/sys/fs/cgroup/memory.stat", "inactive_file")
+		return limit, current, cgroupMemoryAvailable(limit, current, reclaimable)
 	}
 
 	limit, lerr = readIntFile("/sys/fs/cgroup/memory/memory.limit_in_bytes")
 	current, cerr = readIntFile("/sys/fs/cgroup/memory/memory.usage_in_bytes")
 	if lerr == nil && cerr == nil && limit > 0 && limit < math.MaxInt64/2 {
-		return limit, current, max64(0, limit-current)
+		reclaimable, err := readMemoryStat("/sys/fs/cgroup/memory/memory.stat", "total_inactive_file")
+		if err != nil {
+			reclaimable, _ = readMemoryStat("/sys/fs/cgroup/memory/memory.stat", "inactive_file")
+		}
+		return limit, current, cgroupMemoryAvailable(limit, current, reclaimable)
 	}
 
 	meminfo, err := os.Open("/proc/meminfo")
@@ -202,6 +207,58 @@ func detectMemory() (limit, current, available int64) {
 
 	// Portable conservative fallback. Disk backpressure remains authoritative.
 	return 2 * GiB, 0, 2 * GiB
+}
+
+func readMemoryStat(path, key string) (int64, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) != 2 || fields[0] != key {
+			continue
+		}
+		value, parseErr := strconv.ParseInt(fields[1], 10, 64)
+		if parseErr != nil {
+			return 0, fmt.Errorf("parse %s from %s: %w", key, path, parseErr)
+		}
+		if value < 0 {
+			return 0, fmt.Errorf("parse %s from %s: negative value %d", key, path, value)
+		}
+		return value, nil
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	return 0, fmt.Errorf("%s missing from %s", key, path)
+}
+
+// cgroup memory.current includes reclaimable page cache. Treating it all as
+// pinned memory can collapse an I/O-bound uploader to one worker after hashing
+// a large file. Count inactive file pages as available, capped by the cgroup
+// limit and by the amount currently charged to the cgroup.
+func cgroupMemoryAvailable(limit, current, inactiveFile int64) int64 {
+	if limit <= 0 {
+		return 0
+	}
+	if current < 0 {
+		current = 0
+	}
+	if inactiveFile < 0 {
+		inactiveFile = 0
+	}
+	if inactiveFile > current {
+		inactiveFile = current
+	}
+	headroom := max64(0, limit-current)
+	if inactiveFile >= limit-headroom {
+		return limit
+	}
+	return headroom + inactiveFile
 }
 
 func readIntFile(path string) (int64, error) {
