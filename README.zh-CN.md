@@ -72,6 +72,8 @@ panpack backup \
 
 状态目录默认是 `<source>/.panpack`。每卷开始前重新检查资源；封卷上传并通过远端验证后，才原子提交状态并释放本地空间。
 
+省略 `--remote-dir` 时，panpack 会生成 `/apps/bypy/panpack-<snapshot-id>`。snapshot ID 包含 UTC 时间和加密随机后缀，并会持久化供断点续传复用，因此不同备份 state 不会互相覆盖。
+
 ## 上传已有封装包
 
 如果旧管线已经生成不可变归档，使用 `upload-batch` 原地续传，不重新打包：

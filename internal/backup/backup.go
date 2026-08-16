@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -33,9 +34,10 @@ type Config struct {
 }
 
 type Result struct {
-	Snapshot *manifest.Snapshot
-	State    state.Backup
-	Policy   resource.Policy
+	Snapshot  *manifest.Snapshot
+	State     state.Backup
+	Policy    resource.Policy
+	RemoteDir string
 }
 
 type VolumeIndex struct {
@@ -71,6 +73,11 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	if snapshot.Source != cfg.Source {
 		return nil, fmt.Errorf("snapshot source is %q, requested %q", snapshot.Source, cfg.Source)
 	}
+	cfg.RemoteDir, err = resolveRemoteDir(cfg, snapshot.ID)
+	if err != nil {
+		return nil, err
+	}
+	logger.Printf("remote directory: %s", cfg.RemoteDir)
 	resources, err := resource.Detect(cfg.StagingDir)
 	if err != nil {
 		return nil, err
@@ -81,7 +88,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 	}
 	logger.Printf("policy: volume=%d bytes, upload concurrency=%d..%d, disk reserve=%d bytes", policy.VolumeBytes, policy.InitialConcurrency, policy.MaxConcurrency, policy.ReserveBytes)
 	if cfg.DryRun {
-		return &Result{Snapshot: snapshot, Policy: policy}, nil
+		return &Result{Snapshot: snapshot, Policy: policy, RemoteDir: cfg.RemoteDir}, nil
 	}
 
 	store, err := state.Open(cfg.StateDir, snapshot.ID, cfg.Source, cfg.RemoteDir)
@@ -153,7 +160,7 @@ func Run(ctx context.Context, cfg Config) (*Result, error) {
 		return nil, err
 	}
 	final := store.Snapshot()
-	return &Result{Snapshot: snapshot, State: final, Policy: policy}, nil
+	return &Result{Snapshot: snapshot, State: final, Policy: policy, RemoteDir: cfg.RemoteDir}, nil
 }
 
 func resolveConfig(cfg Config) (Config, error) {
@@ -178,9 +185,11 @@ func resolveConfig(cfg Config) (Config, error) {
 		return cfg, err
 	}
 	cfg.StagingDir = filepath.Clean(staging)
-	cfg.RemoteDir = strings.TrimRight(cfg.RemoteDir, "/")
-	if !strings.HasPrefix(cfg.RemoteDir, "/apps/") {
-		return cfg, fmt.Errorf("remote directory must be under /apps/<app>: %q", cfg.RemoteDir)
+	if cfg.RemoteDir != "" {
+		cfg.RemoteDir, err = cleanRemoteDir(cfg.RemoteDir)
+		if err != nil {
+			return cfg, err
+		}
 	}
 	if cfg.Limits.MinVolume == 0 {
 		cfg.Limits = resource.DefaultLimits()
@@ -189,6 +198,43 @@ func resolveConfig(cfg Config) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+func resolveRemoteDir(cfg Config, snapshotID string) (string, error) {
+	if cfg.RemoteDir != "" {
+		return cfg.RemoteDir, nil
+	}
+	existing, err := state.Load(cfg.StateDir)
+	if err == nil {
+		if existing.SnapshotID != snapshotID {
+			return "", fmt.Errorf("backup state belongs to snapshot %s, current snapshot is %s", existing.SnapshotID, snapshotID)
+		}
+		remoteDir, cleanErr := cleanRemoteDir(existing.RemoteDir)
+		if cleanErr != nil {
+			return "", fmt.Errorf("stored backup remote directory: %w", cleanErr)
+		}
+		return remoteDir, nil
+	}
+	if !os.IsNotExist(err) {
+		return "", fmt.Errorf("read backup state for remote directory: %w", err)
+	}
+	if snapshotID == "" {
+		return "", errors.New("snapshot ID is empty")
+	}
+	for _, char := range snapshotID {
+		if (char < 'a' || char > 'z') && (char < 'A' || char > 'Z') && (char < '0' || char > '9') && char != '-' && char != '_' {
+			return "", fmt.Errorf("snapshot ID contains unsafe character %q", char)
+		}
+	}
+	return path.Join("/apps/bypy", "panpack-"+snapshotID), nil
+}
+
+func cleanRemoteDir(remoteDir string) (string, error) {
+	clean := path.Clean(strings.TrimRight(remoteDir, "/"))
+	if remoteDir == "" || !strings.HasPrefix(clean, "/apps/") {
+		return "", fmt.Errorf("remote directory must be under /apps/<app>: %q", remoteDir)
+	}
+	return clean, nil
 }
 
 func loadOrBuildSnapshot(ctx context.Context, cfg Config, logger *log.Logger) (*manifest.Snapshot, error) {

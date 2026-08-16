@@ -135,7 +135,7 @@ func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer, dry
 	stateDir := fs.String("state-dir", "", "state directory (default: <source>/.panpack)")
 	stagingDir := fs.String("staging-dir", "", "volume staging directory (default: <state-dir>/staging)")
 	receiptFile := fs.String("receipt-file", "", "atomic run receipt (default: <state-dir>/backup-run.receipt.json; '-' disables)")
-	remoteDir := fs.String("remote-dir", "/apps/bypy/autodl-tmp-backup-panpack", "absolute Baidu Netdisk destination")
+	remoteDir := fs.String("remote-dir", "", "absolute Baidu Netdisk destination (default: unique /apps/bypy/panpack-<snapshot-id>)")
 	tokenFile := fs.String("token-file", "", "credentials JSON; supports bypy.json")
 	volumeSize := fs.String("volume-size", "auto", "fixed volume size or auto")
 	minVolume := fs.String("min-volume-size", "64MiB", "smallest adaptive volume")
@@ -201,10 +201,10 @@ func runBackup(ctx context.Context, args []string, stdout, stderr io.Writer, dry
 		return err
 	}
 	if dryRun {
-		_, retErr = fmt.Fprintf(stdout, "snapshot=%s entries=%d files=%d bytes=%d volume=%s concurrency=%d..%d reserve=%s\n",
+		_, retErr = fmt.Fprintf(stdout, "snapshot=%s entries=%d files=%d bytes=%d volume=%s concurrency=%d..%d reserve=%s remote=%s\n",
 			result.Snapshot.ID, result.Snapshot.EntryCount, result.Snapshot.FileCount, result.Snapshot.TotalFileBytes,
 			bytesize.Format(result.Policy.VolumeBytes), result.Policy.InitialConcurrency, result.Policy.MaxConcurrency,
-			bytesize.Format(result.Policy.ReserveBytes))
+			bytesize.Format(result.Policy.ReserveBytes), result.RemoteDir)
 		return retErr
 	}
 	_, retErr = fmt.Fprintf(stdout, "backup complete: snapshot=%s volumes=%d remote=%s receipt=%s\n", result.Snapshot.ID, len(result.State.Volumes), result.State.RemoteDir, displayReceipt(resolvedReceipt))
