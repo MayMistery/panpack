@@ -47,10 +47,12 @@ type UploadStats struct {
 }
 
 type RemoteInfo struct {
-	FsID int64
-	Path string
-	Size int64
-	MD5  string
+	FsID  int64
+	Path  string
+	Name  string
+	Size  int64
+	MD5   string
+	IsDir bool
 }
 
 func New(accessToken string, blockSize int64, initialConcurrency, maxConcurrency int, logger *log.Logger) (*Client, error) {
@@ -327,39 +329,101 @@ func (c *Client) RemoteInfo(ctx context.Context, remotePath string) (RemoteInfo,
 	}
 	dir, name := path.Split(remotePath)
 	dir = strings.TrimSuffix(dir, "/")
-	start, limit := 0, 1000
-	order, desc := "name", 0
-	for {
-		listing, err := c.api.File.List(ctx, &api.ListParams{Dir: dir, Order: &order, Desc: &desc, Start: &start, Limit: &limit})
-		if err != nil {
-			return RemoteInfo{}, fmt.Errorf("list remote directory %s: %w", dir, err)
+	listing, err := c.ListDir(ctx, dir)
+	if err != nil {
+		return RemoteInfo{}, err
+	}
+	for _, file := range listing {
+		if file.Name != name && file.Path != remotePath {
+			continue
 		}
-		for _, file := range listing.List {
-			if file.ServerFilename != name && file.Path != remotePath {
-				continue
-			}
-			// The list API does not reliably include an MD5. Resolve the file's
-			// fs_id first, then use filemetas, whose contract includes size and MD5.
-			metadata, err := c.api.Download.Meta(ctx, &api.MetaParams{FsIDs: []int64{file.FsID}})
-			if err != nil {
-				return RemoteInfo{}, fmt.Errorf("read remote metadata for %s: %w", remotePath, err)
-			}
-			for _, item := range metadata.List {
-				if item.FsID != file.FsID {
-					continue
-				}
-				if item.MD5 == "" {
-					return RemoteInfo{}, fmt.Errorf("remote metadata for %s has no md5", remotePath)
-				}
-				return RemoteInfo{FsID: item.FsID, Path: item.Path, Size: item.Size, MD5: item.MD5}, nil
-			}
+		if file.IsDir {
+			return RemoteInfo{}, fmt.Errorf("remote path is a directory: %s", remotePath)
+		}
+		metadata, err := c.Metadata(ctx, []int64{file.FsID})
+		if err != nil {
+			return RemoteInfo{}, fmt.Errorf("read remote metadata for %s: %w", remotePath, err)
+		}
+		info, ok := metadata[file.FsID]
+		if !ok {
 			return RemoteInfo{}, fmt.Errorf("remote metadata not found for %s (fs_id=%d)", remotePath, file.FsID)
 		}
+		if info.MD5 == "" {
+			return RemoteInfo{}, fmt.Errorf("remote metadata for %s has no md5", remotePath)
+		}
+		return info, nil
+	}
+	return RemoteInfo{}, fmt.Errorf("%w: %s", ErrRemoteNotFound, remotePath)
+}
+
+func (c *Client) ListDir(ctx context.Context, remoteDir string) ([]RemoteInfo, error) {
+	remoteDir, err := validateRemotePath(remoteDir)
+	if err != nil {
+		return nil, err
+	}
+	start, limit := 0, 1000
+	order, desc := "name", 0
+	var result []RemoteInfo
+	for {
+		var listing *api.ListResponse
+		_, _, err := c.retry(ctx, func() error {
+			var callErr error
+			listing, callErr = c.api.File.List(ctx, &api.ListParams{Dir: remoteDir, Order: &order, Desc: &desc, Start: &start, Limit: &limit})
+			return callErr
+		})
+		if err != nil {
+			return nil, fmt.Errorf("list remote directory %s: %w", remoteDir, err)
+		}
+		for _, file := range listing.List {
+			result = append(result, RemoteInfo{
+				FsID: file.FsID, Path: file.Path, Name: file.ServerFilename,
+				Size: file.Size, MD5: file.MD5, IsDir: file.Isdir != 0,
+			})
+		}
 		if len(listing.List) < limit {
-			return RemoteInfo{}, fmt.Errorf("%w: %s", ErrRemoteNotFound, remotePath)
+			return result, nil
 		}
 		start += len(listing.List)
 	}
+}
+
+func (c *Client) Metadata(ctx context.Context, fsIDs []int64) (map[int64]RemoteInfo, error) {
+	result := make(map[int64]RemoteInfo, len(fsIDs))
+	unique := make([]int64, 0, len(fsIDs))
+	seen := make(map[int64]struct{}, len(fsIDs))
+	for _, fsID := range fsIDs {
+		if fsID <= 0 {
+			return nil, fmt.Errorf("invalid remote fs_id %d", fsID)
+		}
+		if _, ok := seen[fsID]; ok {
+			continue
+		}
+		seen[fsID] = struct{}{}
+		unique = append(unique, fsID)
+	}
+	for start := 0; start < len(unique); start += 100 {
+		end := start + 100
+		if end > len(unique) {
+			end = len(unique)
+		}
+		batch := unique[start:end]
+		var metadata *api.MetaResponse
+		_, _, err := c.retry(ctx, func() error {
+			var callErr error
+			metadata, callErr = c.api.Download.Meta(ctx, &api.MetaParams{FsIDs: batch})
+			return callErr
+		})
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range metadata.List {
+			result[item.FsID] = RemoteInfo{
+				FsID: item.FsID, Path: item.Path, Name: item.Filename,
+				Size: item.Size, MD5: item.MD5, IsDir: item.Isdir != 0,
+			}
+		}
+	}
+	return result, nil
 }
 
 func (c *Client) Verify(ctx context.Context, remotePath string, size int64, expectedMD5 string, blocks []string) error {
