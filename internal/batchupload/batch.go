@@ -27,6 +27,7 @@ type Config struct {
 	Pattern           string
 	RemoteDir         string
 	StateFile         string
+	ReceiptFile       string
 	TokenFile         string
 	DeleteAfterVerify bool
 	MaxFileAttempts   int
@@ -39,6 +40,7 @@ type FileRecord struct {
 	Name            string    `json:"name"`
 	Size            int64     `json:"size"`
 	MD5             string    `json:"md5,omitempty"`
+	RemoteMD5       string    `json:"remote_md5,omitempty"`
 	Attempts        int       `json:"attempts"`
 	Uploaded        bool      `json:"uploaded"`
 	UploadedAt      time.Time `json:"uploaded_at,omitempty"`
@@ -157,6 +159,11 @@ func runWithClient(ctx context.Context, cfg Config, state *State, client uploadC
 			return resultFromState(cfg.StateFile, state), fmt.Errorf("pending file %s changed while hashing", record.Name)
 		}
 		record.MD5 = fullMD5
+		remoteMD5, err := baidu.RemoteMD5(blocks)
+		if err != nil {
+			return resultFromState(cfg.StateFile, state), fmt.Errorf("calculate remote checksum for %s: %w", record.Name, err)
+		}
+		record.RemoteMD5 = remoteMD5
 		state.UpdatedAt = time.Now().UTC()
 		if err := saveState(cfg.StateFile, state); err != nil {
 			return resultFromState(cfg.StateFile, state), err
@@ -266,6 +273,13 @@ func resolveConfig(cfg Config) (Config, error) {
 		return cfg, err
 	}
 	cfg.StateFile = filepath.Clean(stateFile)
+	if cfg.ReceiptFile != "" {
+		receiptFile, err := filepath.Abs(cfg.ReceiptFile)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.ReceiptFile = filepath.Clean(receiptFile)
+	}
 	if cfg.MaxFileAttempts <= 0 {
 		cfg.MaxFileAttempts = 20
 	}
@@ -282,16 +296,12 @@ func resolveConfig(cfg Config) (Config, error) {
 }
 
 func loadOrCreateState(cfg Config) (*State, error) {
-	data, err := os.ReadFile(cfg.StateFile)
+	state, err := LoadState(cfg.StateFile)
 	if err == nil {
-		var state State
-		if err := json.Unmarshal(data, &state); err != nil {
-			return nil, fmt.Errorf("decode upload state: %w", err)
-		}
 		if state.FormatVersion != FormatVersion || state.SourceDir != cfg.SourceDir || state.Pattern != cfg.Pattern || state.RemoteDir != cfg.RemoteDir {
 			return nil, errors.New("upload state does not match the requested source, pattern, or remote directory")
 		}
-		return &state, nil
+		return state, nil
 	}
 	if !os.IsNotExist(err) {
 		return nil, err
@@ -301,11 +311,12 @@ func loadOrCreateState(cfg Config) (*State, error) {
 		return nil, err
 	}
 	sort.Strings(matches)
+	matches = filterControlFiles(matches, cfg)
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("no files match %s", filepath.Join(cfg.SourceDir, cfg.Pattern))
 	}
 	now := time.Now().UTC()
-	state := &State{FormatVersion: FormatVersion, SourceDir: cfg.SourceDir, Pattern: cfg.Pattern, RemoteDir: cfg.RemoteDir, CreatedAt: now, UpdatedAt: now}
+	state = &State{FormatVersion: FormatVersion, SourceDir: cfg.SourceDir, Pattern: cfg.Pattern, RemoteDir: cfg.RemoteDir, CreatedAt: now, UpdatedAt: now}
 	for _, match := range matches {
 		info, err := os.Lstat(match)
 		if err != nil {
@@ -322,6 +333,21 @@ func loadOrCreateState(cfg Config) (*State, error) {
 		return nil, err
 	}
 	return state, nil
+}
+
+func LoadState(stateFile string) (*State, error) {
+	data, err := os.ReadFile(stateFile)
+	if err != nil {
+		return nil, err
+	}
+	var state State
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("decode upload state: %w", err)
+	}
+	if state.FormatVersion != FormatVersion {
+		return nil, fmt.Errorf("unsupported upload state format %d", state.FormatVersion)
+	}
+	return &state, nil
 }
 
 func validateStateFiles(cfg Config, state *State) error {
@@ -364,11 +390,42 @@ func validateStateFiles(cfg Config, state *State) error {
 		return err
 	}
 	for _, match := range matches {
+		if isControlFile(match, cfg) {
+			continue
+		}
 		if _, ok := known[filepath.Base(match)]; !ok {
 			return fmt.Errorf("new matching file is absent from immutable upload state: %s", match)
 		}
 	}
 	return nil
+}
+
+func filterControlFiles(matches []string, cfg Config) []string {
+	filtered := matches[:0]
+	for _, match := range matches {
+		if !isControlFile(match, cfg) {
+			filtered = append(filtered, match)
+		}
+	}
+	return filtered
+}
+
+func isControlFile(filePath string, cfg Config) bool {
+	filePath = filepath.Clean(filePath)
+	defaultReceipt := cfg.StateFile + ".receipt.json"
+	control := []string{
+		cfg.StateFile, cfg.StateFile + ".tmp", cfg.StateFile + ".lock",
+		defaultReceipt, defaultReceipt + ".tmp", defaultReceipt + ".lock",
+	}
+	if cfg.ReceiptFile != "" {
+		control = append(control, cfg.ReceiptFile, cfg.ReceiptFile+".tmp", cfg.ReceiptFile+".lock")
+	}
+	for _, candidate := range control {
+		if filePath == filepath.Clean(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func completeRecord(record *FileRecord, duration time.Duration, stats baidu.UploadStats) {

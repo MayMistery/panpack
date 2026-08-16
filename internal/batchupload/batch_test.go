@@ -95,6 +95,11 @@ func TestBatchRecoversExactRemoteRetriesAndDeletesVerifiedFiles(t *testing.T) {
 	if !loaded.Completed || !loaded.Files[0].Uploaded || !loaded.Files[1].Uploaded {
 		t.Fatalf("state not completed: %+v", loaded)
 	}
+	for _, record := range loaded.Files {
+		if record.MD5 == "" || record.RemoteMD5 == "" {
+			t.Fatalf("state did not retain auditable checksums for %s: %+v", record.Name, record)
+		}
+	}
 }
 
 func TestBatchRefusesRemoteCollision(t *testing.T) {
@@ -128,5 +133,40 @@ func TestBatchRefusesRemoteCollision(t *testing.T) {
 	}
 	if _, err := os.Stat(localPath); err != nil {
 		t.Fatalf("local file was removed after collision: %v", err)
+	}
+}
+
+func TestBatchNeverFreezesStateOrReceiptControlFiles(t *testing.T) {
+	sourceDir := t.TempDir()
+	stateFile := filepath.Join(sourceDir, "state.json")
+	receiptFile := filepath.Join(sourceDir, "receipt.json")
+	for name, data := range map[string][]byte{
+		"payload.bin":                  []byte("payload"),
+		"state.json.lock":              nil,
+		"state.json.receipt.json":      []byte("old receipt"),
+		"state.json.receipt.json.lock": nil,
+		"receipt.json":                 []byte("running"),
+		"receipt.json.lock":            nil,
+	} {
+		if err := os.WriteFile(filepath.Join(sourceDir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg, err := resolveConfig(Config{
+		SourceDir: sourceDir, Pattern: "*", RemoteDir: "/apps/test/backup",
+		StateFile: stateFile, ReceiptFile: receiptFile, Limits: resource.DefaultLimits(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, err := loadOrCreateState(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Files) != 1 || state.Files[0].Name != "payload.bin" {
+		t.Fatalf("control files leaked into frozen state: %+v", state.Files)
+	}
+	if err := validateStateFiles(cfg, state); err != nil {
+		t.Fatalf("control files invalidated immutable state: %v", err)
 	}
 }

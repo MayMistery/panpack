@@ -164,6 +164,76 @@ func TestRemoteInfoNotFound(t *testing.T) {
 	}
 }
 
+func TestListDirPaginatesAndMetadataUsesHundredFileBatches(t *testing.T) {
+	var mu sync.Mutex
+	listCalls := 0
+	metaCalls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		method := r.URL.Query().Get("method")
+		switch method {
+		case "list":
+			start, _ := strconv.Atoi(r.URL.Query().Get("start"))
+			mu.Lock()
+			listCalls++
+			mu.Unlock()
+			items := make([]map[string]any, 0, 1000)
+			count := 1000
+			if start >= 1000 {
+				count = 1
+			}
+			for index := 0; index < count; index++ {
+				id := int64(start + index + 1)
+				name := fmt.Sprintf("chunk_%04d.tar", start+index)
+				items = append(items, map[string]any{"fs_id": id, "path": "/apps/test/backup/" + name, "server_filename": name, "size": id, "isdir": 0})
+			}
+			writeJSON(w, map[string]any{"errno": 0, "list": items})
+		case "filemetas":
+			var ids []int64
+			if err := json.Unmarshal([]byte(r.URL.Query().Get("fsids")), &ids); err != nil {
+				t.Error(err)
+			}
+			if len(ids) > 100 {
+				t.Errorf("metadata batch has %d ids", len(ids))
+			}
+			mu.Lock()
+			metaCalls++
+			mu.Unlock()
+			items := make([]map[string]any, 0, len(ids))
+			for _, id := range ids {
+				items = append(items, map[string]any{"fs_id": id, "path": fmt.Sprintf("/apps/test/backup/chunk_%04d.tar", id-1), "filename": fmt.Sprintf("chunk_%04d.tar", id-1), "size": id, "md5": fmt.Sprintf("md5-%d", id)})
+			}
+			writeJSON(w, map[string]any{"errno": 0, "list": items})
+		default:
+			http.Error(w, "unexpected request", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	client, err := NewWithAPI(api.NewClient(api.WithBaseURL(server.URL)), 4<<20, 1, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := client.ListDir(context.Background(), "/apps/test/backup")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1001 || entries[1000].Name != "chunk_1000.tar" {
+		t.Fatalf("unexpected paginated listing: count=%d last=%+v", len(entries), entries[len(entries)-1])
+	}
+	ids := make([]int64, 101)
+	for index := range ids {
+		ids[index] = int64(index + 1)
+	}
+	metadata, err := client.Metadata(context.Background(), ids)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if listCalls != 2 || metaCalls != 2 || len(metadata) != 101 {
+		t.Fatalf("unexpected calls/results: list=%d metadata=%d results=%d", listCalls, metaCalls, len(metadata))
+	}
+}
+
 func TestAdaptiveConcurrencyFeedback(t *testing.T) {
 	client, err := NewWithAPI(api.NewClient(), 4<<20, 8, 16, nil)
 	if err != nil {
