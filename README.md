@@ -74,6 +74,8 @@ panpack backup \
 
 State defaults to `<source>/.panpack`. The command re-evaluates resource limits before each volume, uploads and verifies one sealed volume, commits its state atomically, then releases the local space.
 
+If `--remote-dir` is omitted, panpack creates `/apps/bypy/panpack-<snapshot-id>`. The snapshot ID contains a UTC timestamp and a cryptographically random suffix; it is persisted and reused on resume, so separate backup states do not overwrite one another.
+
 ## Uploading an existing sealed batch
 
 Use `upload-batch` when another pipeline has already produced immutable archives and they must not be repacked:

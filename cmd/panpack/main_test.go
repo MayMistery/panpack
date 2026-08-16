@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/MayMistery/panpack/internal/runreceipt"
@@ -53,5 +54,39 @@ func TestReceiptPathDashDisablesReceipt(t *testing.T) {
 	}
 	if got != "" {
 		t.Fatalf("disabled receipt resolved to %q", got)
+	}
+}
+
+func TestPlanGeneratesStableSnapshotScopedRemoteDirectory(t *testing.T) {
+	sourceDir := t.TempDir()
+	stateDir := filepath.Join(t.TempDir(), "state")
+	args := []string{
+		"--source", sourceDir,
+		"--state-dir", stateDir,
+		"--min-free", "1MiB",
+		"--reserve-fraction", "0",
+		"--min-volume-size", "1MiB",
+		"--max-volume-size", "2MiB",
+	}
+	runPlan := func() string {
+		t.Helper()
+		var stdout, stderr bytes.Buffer
+		if err := runBackup(context.Background(), args, &stdout, &stderr, true); err != nil {
+			t.Fatalf("plan failed: %v\nstderr: %s", err, stderr.String())
+		}
+		marker := "remote="
+		index := strings.LastIndex(stdout.String(), marker)
+		if index < 0 {
+			t.Fatalf("plan did not print a remote directory: %s", stdout.String())
+		}
+		return strings.TrimSpace(stdout.String()[index+len(marker):])
+	}
+	first := runPlan()
+	second := runPlan()
+	if !strings.HasPrefix(first, "/apps/bypy/panpack-") {
+		t.Fatalf("unexpected generated remote directory %q", first)
+	}
+	if first != second {
+		t.Fatalf("generated remote directory changed across resume: %q != %q", first, second)
 	}
 }

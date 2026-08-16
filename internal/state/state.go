@@ -54,14 +54,9 @@ type Store struct {
 func Open(stateDir, snapshotID, source, remoteDir string) (*Store, error) {
 	path := filepath.Join(stateDir, "backup-state.json")
 	store := &Store{path: path}
-	data, err := os.ReadFile(path)
+	backup, err := Load(stateDir)
 	if err == nil {
-		if err := json.Unmarshal(data, &store.data); err != nil {
-			return nil, fmt.Errorf("decode backup state: %w", err)
-		}
-		if store.data.FormatVersion != FormatVersion {
-			return nil, fmt.Errorf("unsupported backup state format %d", store.data.FormatVersion)
-		}
+		store.data = backup
 		if store.data.SnapshotID != snapshotID {
 			return nil, fmt.Errorf("backup state belongs to snapshot %s, current snapshot is %s", store.data.SnapshotID, snapshotID)
 		}
@@ -86,6 +81,21 @@ func Open(stateDir, snapshotID, source, remoteDir string) (*Store, error) {
 		return nil, err
 	}
 	return store, nil
+}
+
+func Load(stateDir string) (Backup, error) {
+	data, err := os.ReadFile(filepath.Join(stateDir, "backup-state.json"))
+	if err != nil {
+		return Backup{}, err
+	}
+	var backup Backup
+	if err := json.Unmarshal(data, &backup); err != nil {
+		return Backup{}, fmt.Errorf("decode backup state: %w", err)
+	}
+	if backup.FormatVersion != FormatVersion {
+		return Backup{}, fmt.Errorf("unsupported backup state format %d", backup.FormatVersion)
+	}
+	return backup, nil
 }
 
 func (s *Store) Snapshot() Backup {
